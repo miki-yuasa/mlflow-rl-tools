@@ -16,6 +16,18 @@ class MLflowOutputFormat(KVWriter):
         key_excluded: dict[str, str | tuple[str, ...]],
         step: int = 0,
     ) -> None:
+        """
+        Write key/value pairs to MLflow.
+
+        Parameters
+        ----------
+        key_values: dict[str, Any]
+            The key/value pairs to write.
+        key_excluded: dict[str, str | tuple[str, ...]]
+            The keys to exclude from writing.
+        step: int = 0
+            The step number to associate with the key/value pairs.
+        """
 
         for (key, value), (_, excluded) in zip(
             sorted(key_values.items()), sorted(key_excluded.items())
