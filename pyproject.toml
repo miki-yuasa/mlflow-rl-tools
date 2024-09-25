@@ -1,0 +1,20 @@
+[tool.poetry]
+name = "mlflow-rl-tools"
+version = "0.1.0"
+description = "RL-related tools for MLflow"
+authors = ["Mikihisa Yuasa <myuasa2@illinois.edu>"]
+license = "MIT"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+mlflow = "^2.0.1"
+stable-baselines3 = { version = "^2.0.0", optional = true }
+
+[tool.poetry.extras]
+sb3 = ["stable-baselines3"]
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
