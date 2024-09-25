@@ -42,16 +42,16 @@ class ModelWrapper(PythonModel):
         """
         return self.model.predict(model_input)
 
-    def load_context(self, context: PythonModelContext) -> None:
-        """
-        Load the model context.
+    # def load_context(self, context: PythonModelContext) -> None:
+    #     """
+    #     Load the model context.
 
-        Parameters
-        ----------
-        context: PythonModelContext
-            The context object for the model. Automatically passed by MLflow.
-        """
-        self.model.load(context.artifacts["model"])
+    #     Parameters
+    #     ----------
+    #     context: PythonModelContext
+    #         The context object for the model. Automatically passed by MLflow.
+    #     """
+    #     self.model.load(context.artifacts["model"])
 
     def call_model_method(self, method_name: str, *args, **kwargs) -> Any:
         """
