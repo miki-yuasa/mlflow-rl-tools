@@ -11,7 +11,6 @@ PyTorch (native) format
 import os
 import posixpath
 import shutil
-from types import ModuleType
 from typing import Any, TypeVar
 
 import mlflow
@@ -24,7 +23,6 @@ from mlflow.models.model import MLMODEL_FILE_NAME
 from mlflow.models.signature import _infer_signature_from_input_example
 from mlflow.models.utils import ModelInputExample, _save_example, _Example
 from mlflow.protos.databricks_pb2 import RESOURCE_DOES_NOT_EXIST
-from mlflow.pytorch import pickle_module as mlflow_pytorch_pickle_module
 from mlflow.tracking._model_registry import DEFAULT_AWAIT_MAX_SLEEP_SECONDS
 from mlflow.tracking.artifact_utils import _download_artifact_from_uri
 from mlflow.utils.autologging_utils import autologging_integration, safe_patch
@@ -57,14 +55,12 @@ import stable_baselines3
 from stable_baselines3.common.base_class import SelfBaseAlgorithm, BaseAlgorithm
 import yaml
 
-from mlflow_rl_tools.sb3 import sb3_pickle_module
 from mlflow_rl_tools.sb3.wrapper import ModelWrapper
 
 FLAVOR_NAME = "sb3"
 
 _SERIALIZED_SB3_MODEL_FILE_NAME = "model.zip"
 _SB3_STATE_DICT_FILE_NAME = "state_dict.pth"
-_PICKLE_MODULE_INFO_FILE_NAME = "pickle_module_info.txt"
 _EXTRA_FILES_KEY = "extra_files"
 _SB3_CPU_DEVICE_NAME = "cpu"
 _SB3_DEFAULT_GPU_DEVICE_NAME = "cuda"
@@ -82,20 +78,11 @@ def get_default_pip_requirements():
     -------
     default_pip_requirements : list[str]
         List of default pip requirements for MLflow Models produced by this flavor.
-        Calls to :func:`save_model()` and :func:`log_model()` produce a pip environment.
+        Calls to `save_model()` and `log_model()` produce a pip environment.
         This pip environment, at minimum, contains these requirements.
     """
     default_requirements: list[str] = list(
-        map(
-            _get_pinned_requirement,
-            [
-                "stable-baselines3",
-                # We include CloudPickle in the default environment because
-                # it's required by the default pickle module used by `save_model()`
-                # and `log_model()`: `mlflow.pytorch.pickle_module`.
-                "cloudpickle",
-            ],
-        )
+        map(_get_pinned_requirement, ["stable-baselines3"])
     )
 
     return default_requirements
@@ -106,8 +93,204 @@ def log_model(
     artifact_path: str,
     conda_env: dict[str, Any] | None = None,
     code_paths: list[str] | None = None,
-    pickle_module=None,
-): ...
+    registered_model_name: str | None = None,
+    signature: ModelSignature | None = None,
+    input_example: ModelInputExample | None = None,
+    await_registration_for: int = DEFAULT_AWAIT_MAX_SLEEP_SECONDS,
+    extra_files: list[str] | None = None,
+    pip_requirements: str | list[str] | None = None,
+    extra_pip_requirements: str | list[str] | None = None,
+    metadata: dict[str, Any] | None = None,
+    **kwargs,
+):
+    """
+    Log a PyTorch model as an MLflow artifact for the current run.
+
+    .. warning:: Log the model with a signature to avoid inference errors.
+        If the model is logged without a signature, the MLflow Model Server relies on the
+        default inferred data type from NumPy. However, PyTorch often expects different
+        defaults, particularly when parsing floats. You must include the signature to ensure
+        that the model is logged with the correct data type so that the MLflow model server
+        can correctly provide valid input.
+
+    Parameters
+    ----------
+    sb3_model: SelfBaseAlgorithm
+        Stable-Baselines3 model to be saved.
+
+    artifact_path: str
+        Run-relative artifact path.
+
+    conda_env: dict[str, Any] | None = None
+        If provided, this dictionary is included in the model's MLmodel file.
+        The dictionary should contain a valid Conda environment.
+        This parameter is used to specify a custom environment for the model.
+
+    code_paths: list[str] | None = None
+        A list of local filesystem paths to Python file dependencies (or directories containing file dependencies).
+        These files are *prepended* to the system path when the model is loaded.
+        Files declared as dependencies for a given model should have relative imports declared from a common root path
+        if multiple files are defined with import dependencies between them to avoid import errors when loading the model.
+
+    registered_model_name: str | None = None
+        If given, create a model version under ``registered_model_name``,
+        also create a registered model if one with the given name does not exist.
+
+    signature: ModelSignature | None = None
+        An instance of the :py:class:`ModelSignature <mlflow.models.ModelSignature>` class
+        that describes the model's inputs and outputs.
+        If not specified but an ``input_example`` is supplied, a signature will be
+        automatically inferred based on the supplied input example and model.
+        To disable automatic signature inference when providing an input example, set ``signature`` to ``False``.
+        To manually infer a model signature, call :py`infer_signature() <mlflow.models.infer_signature>`
+        on datasets with valid model inputs, such as a training dataset with the target columnomitted,
+        and valid model outputs, like model predictions made on the trainingdataset, for example:
+        ```python
+        from mlflow.models import infer_signature
+
+        train = df.drop_column("target_label")
+        predictions = ...  # compute model predictions
+        signature = infer_signature(train, predictions)
+        ```
+
+    input_example: ModelInputExample | None = None
+        One or several instances of valid model input. The input example is used as a hint of what data to feed the model.
+        It will be converted to a Pandas DataFrame and then serialized to json using the Pandas split-oriented format,
+        or a numpy array where the example will be serialized to json by converting it to a list.
+        Bytes are base64-encoded. When the ``signature`` parameter is ``None``, the input example is
+        used to infer a model signature.
+
+    await_registration_for: int = DEFAULT_AWAIT_MAX_SLEEP_SECONDS
+        Number of seconds to wait for the model version to finish  being created and is in ``READY`` status.
+        By default, the function waits for five minutes.
+        Specify 0 or None to skip waiting.
+
+    extra_files: list[str] | None = None
+        A list of local filesystem paths to supplementary files that should be packaged with the model.
+        These files are copied to the same location as the model when it is saved.
+        For example, consider the following ``extra_files`` list.
+        In this case, the ``"my_file1 & my_file2"`` extra file is downloaded from S3:
+        ```python
+        extra_files = ["s3://my-bucket/path/to/my_file1", "s3://my-bucket/path/to/my_file2"]
+        ```
+
+    pip_requirements: str | list[str] | None = None
+        Either an iterable of pip requirement strings
+        (e.g. ``["{{ package_name }}", "-r requirements.txt", "-c constraints.txt"]``) or the string path
+        to a pip requirements file on the local filesystem (e.g. ``"requirements.txt"``).
+        If provided, this describes the environment this model should be run in.
+        If ``None``, a default list of requirements is inferred by `mlflow.models.infer_pip_requirements`
+        from the current software environment.
+        If the requirement inference fails, it falls back to using `get_default_pip_requirements`.
+        Both requirements and constraints are automatically parsed and written to ``requirements.txt`` and
+        ``constraints.txt`` files, respectively, and stored as part of the model.
+        Requirements are alsoritten to the ``pip`` section of the model's conda environment (``conda.yaml``) file.
+
+    extra_pip_requirements: str | list[str] | None = None
+        Either an iterable of pip requirement strings
+        (e.g. ``["{{ package_name }}", "-r requirements.txt", "-c constraints.txt"]``)
+        or the string path to a pip requirements file on the local filesystem (e.g. ``"requirements.txt"``).
+        If provided, this describes additional requirements for the model that are not included
+        in the main ``pip_requirements``.
+        If ``None``, no extra requirements are added to the model.
+        Both requirements and constraints are automatically parsed and written to ``requirements.txt`` and
+        ``constraints.txt`` files, respectively, and stored as part of the model.
+        Requirements are also written to the ``pip`` section of the model's conda environment (``conda.yaml``) file.
+
+        warning:
+        The following arguments can't be specified at the same time:
+        - `conda_env`
+        - `pip_requirements`
+        - `extra_pip_requirements`
+
+    metadata: dict[str, Any] | None = None
+        Custom metadata dictionary passed to the model and stored in the MLmodel file.
+
+    kwargs:
+        kwargs to pass to ``stable_baselines3.{algorithm}.save`` method.
+
+
+    Returns
+    -------
+    model_info : `ModelInfo <mlflow.models.ModelInfo>`
+        A `ModelInfo <mlflow.models.model.ModelInfo>` instance that contains the metadata of the logged model.
+
+    Examples
+    --------
+    ```python
+
+        import numpy as np
+        import torch
+        import mlflow
+        from mlflow import MlflowClient
+        from mlflow.models import infer_signature
+
+        # Define model, loss, and optimizer
+        model = nn.Linear(1, 1)
+        criterion = torch.nn.MSELoss()
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.001)
+
+        # Create training data with relationship y = 2X
+        X = torch.arange(1.0, 26.0).reshape(-1, 1)
+        y = X * 2
+
+        # Training loop
+        epochs = 250
+        for epoch in range(epochs):
+            # Forward pass: Compute predicted y by passing X to the model
+            y_pred = model(X)
+
+            # Compute the loss
+            loss = criterion(y_pred, y)
+
+            # Zero gradients, perform a backward pass, and update the weights.
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+        # Create model signature
+        signature = infer_signature(X.numpy(), model(X).detach().numpy())
+
+        # Log the model
+        with mlflow.start_run() as run:
+            mlflow.pytorch.log_model(model, "model")
+
+            # convert to scripted model and log the model
+            scripted_pytorch_model = torch.jit.script(model)
+            mlflow.pytorch.log_model(scripted_pytorch_model, "scripted_model")
+
+        # Fetch the logged model artifacts
+        print(f"run_id: {run.info.run_id}")
+        for artifact_path in ["model/data", "scripted_model/data"]:
+            artifacts = [
+                f.path for f in MlflowClient().list_artifacts(run.info.run_id, artifact_path)
+            ]
+            print(f"artifacts: {artifacts}")
+    ```
+
+    Output
+    ```text
+        run_id: 1a1ec9e413ce48e9abf9aec20efd6f71
+        artifacts: ['model/data/model.pth']
+        artifacts: ['scripted_model/data/model.pth']
+    ```
+    """
+    return Model.log(
+        artifact_path=artifact_path,
+        flavor=mlflow.pytorch,
+        sb3_model=sb3_model,
+        conda_env=conda_env,
+        code_paths=code_paths,
+        registered_model_name=registered_model_name,
+        signature=signature,
+        input_example=input_example,
+        await_registration_for=await_registration_for,
+        extra_files=extra_files,
+        pip_requirements=pip_requirements,
+        extra_pip_requirements=extra_pip_requirements,
+        metadata=metadata,
+        **kwargs,
+    )
 
 
 def save_model(
@@ -116,7 +299,6 @@ def save_model(
     conda_env: dict[str, Any] | None = None,
     mlflow_model: MLflowModel | None = None,
     code_paths: list[str] | None = None,
-    pickle_module: ModuleType | None = None,
     signature: ModelSignature | bool | None = None,
     input_example: ModelInputExample | None = None,
     extra_files: list[str] | None = None,
@@ -127,7 +309,6 @@ def save_model(
     mlmodel_file_name: str = MLMODEL_FILE_NAME,
     model_data_subpath: str = _MODEL_DATA_SUBPATH,
     _serialized_sb3_model_file_name: str = _SERIALIZED_SB3_MODEL_FILE_NAME,
-    _pickle_module_info_file_name: str = _PICKLE_MODULE_INFO_FILE_NAME,
     _conda_env_file_name: str = _CONDA_ENV_FILE_NAME,
     _python_env_file_name: str = _PYTHON_ENV_FILE_NAME,
     _extra_files_key: str = _EXTRA_FILES_KEY,
@@ -135,9 +316,174 @@ def save_model(
     _constraints_file_name: str = _CONSTRAINTS_FILE_NAME,
     **kwargs,
 ) -> None:
-    _validate_env_arguments(conda_env, pip_requirements, extra_pip_requirements)
+    """
+    Save a PyTorch model to a path on the local file system.
 
-    pickle_module = pickle_module or sb3_pickle_module
+    Parameters
+    ----------
+    sb3_model: SelfBaseAlgorithm
+        Stable-Baselines3 model to be saved.
+
+    path: str
+        Local path where the model is to be saved.
+
+    conda_env: dict[str, Any] | None = None
+        If provided, this dictionary is included in the model's MLmodel file.
+        The dictionary should contain a valid Conda environment.
+        This parameter is used to specify a custom environment for the model.
+
+    mlflow_model: MLflowModel | None = None
+        MLflow model `mlflow.models.Model` this flavor is being added to.
+
+    code_paths: list[str] | None = None
+        A list of local filesystem paths to Python file dependencies (or directories containing file dependencies).
+        These files are *prepended* to the system path when the model is loaded.
+        Files declared as dependencies for a given model should have relative imports declared from a common root path
+        if multiple files are defined with import dependencies between them to avoid import errors when loading the model.
+
+    signature: ModelSignature | None = None
+        An instance of the :py:class:`ModelSignature <mlflow.models.ModelSignature>` class
+        that describes the model's inputs and outputs.
+        If not specified but an ``input_example`` is supplied, a signature will be
+        automatically inferred based on the supplied input example and model.
+        To disable automatic signature inference when providing an input example, set ``signature`` to ``False``.
+        To manually infer a model signature, call :py`infer_signature() <mlflow.models.infer_signature>`
+        on datasets with valid model inputs, such as a training dataset with the target columnomitted,
+        and valid model outputs, like model predictions made on the trainingdataset, for example:
+        ```python
+        from mlflow.models import infer_signature
+
+        train = df.drop_column("target_label")
+        predictions = ...  # compute model predictions
+        signature = infer_signature(train, predictions)
+        ```
+
+    input_example: ModelInputExample | None = None
+        One or several instances of valid model input. The input example is used as a hint of what data to feed the model.
+        It will be converted to a Pandas DataFrame and then serialized to json using the Pandas split-oriented format,
+        or a numpy array where the example will be serialized to json by converting it to a list.
+        Bytes are base64-encoded. When the ``signature`` parameter is ``None``, the input example is
+        used to infer a model signature.
+
+    extra_files: list[str] | None = None
+        A list of local filesystem paths to supplementary files that should be packaged with the model.
+        These files are copied to the same location as the model when it is saved.
+        For example, consider the following ``extra_files`` list.
+        In this case, the ``"my_file1 & my_file2"`` extra file is downloaded from S3:
+        ```python
+        extra_files = ["s3://my-bucket/path/to/my_file1", "s3://my-bucket/path/to/my_file2"]
+        ```
+
+    pip_requirements: str | list[str] | None = None
+        Either an iterable of pip requirement strings
+        (e.g. ``["{{ package_name }}", "-r requirements.txt", "-c constraints.txt"]``) or the string path
+        to a pip requirements file on the local filesystem (e.g. ``"requirements.txt"``).
+        If provided, this describes the environment this model should be run in.
+        If ``None``, a default list of requirements is inferred by `mlflow.models.infer_pip_requirements`
+        from the current software environment.
+        If the requirement inference fails, it falls back to using `get_default_pip_requirements`.
+        Both requirements and constraints are automatically parsed and written to ``requirements.txt`` and
+        ``constraints.txt`` files, respectively, and stored as part of the model.
+        Requirements are alsoritten to the ``pip`` section of the model's conda environment (``conda.yaml``) file.
+
+    extra_pip_requirements: str | list[str] | None = None
+        Either an iterable of pip requirement strings
+        (e.g. ``["{{ package_name }}", "-r requirements.txt", "-c constraints.txt"]``)
+        or the string path to a pip requirements file on the local filesystem (e.g. ``"requirements.txt"``).
+        If provided, this describes additional requirements for the model that are not included
+        in the main ``pip_requirements``.
+        If ``None``, no extra requirements are added to the model.
+        Both requirements and constraints are automatically parsed and written to ``requirements.txt`` and
+        ``constraints.txt`` files, respectively, and stored as part of the model.
+        Requirements are also written to the ``pip`` section of the model's conda environment (``conda.yaml``) file.
+
+        warning:
+        The following arguments can't be specified at the same time:
+        - `conda_env`
+        - `pip_requirements`
+        - `extra_pip_requirements`
+
+    metadata: dict[str, Any] | None = None
+        Custom metadata dictionary passed to the model and stored in the MLmodel file.
+
+    flavor_name: str = "sb3"
+        The name of the flavor that is being added to the model.
+
+    mlmodel_file_name: str = "MLmodel"
+        The name of the MLmodel file.
+
+    model_data_subpath: str = "data"
+        The subdirectory within the model's root directory where data is stored.
+
+    _serialized_sb3_model_file_name: str = "model.zip"
+        The name of the serialized SB3 model file.
+
+    _conda_env_file_name: str = "conda.yaml"
+        The name of the Conda environment file.
+
+    _python_env_file_name: str = "python.yaml"
+        The name of the Python environment file.
+
+    _extra_files_key: str = "extra_files"
+        The key in the MLmodel file's flavor configuration that specifies the paths to extra files.
+
+    _requirements_file_name: str = "requirements.txt"
+        The name of the pip requirements file.
+
+    _constraints_file_name: str = "constraints.txt"
+        The name of the pip constraints file.
+
+    kwargs:
+        kwargs to pass to ``stable_baselines3.{algorithm}.save`` method.
+
+    Examples
+    --------
+    ```python
+
+    import os
+    import mlflow
+    import torch
+
+
+    model = nn.Linear(1, 1)
+
+    # Save PyTorch models to current working directory
+    with mlflow.start_run() as run:
+        mlflow.pytorch.save_model(model, "model")
+
+        # Convert to a scripted model and save it
+        scripted_pytorch_model = torch.jit.script(model)
+        mlflow.pytorch.save_model(scripted_pytorch_model, "scripted_model")
+
+    # Load each saved model for inference
+    for model_path in ["model", "scripted_model"]:
+        model_uri = f"{os.getcwd()}/{model_path}"
+        loaded_model = mlflow.pytorch.load_model(model_uri)
+        print(f"Loaded {model_path}:")
+        for x in [6.0, 8.0, 12.0, 30.0]:
+            X = torch.Tensor([[x]])
+            y_pred = loaded_model(X)
+            print(f"predict X: {x}, y_pred: {y_pred.data.item():.2f}")
+        print("--")
+    ```
+
+    Output
+    ```text
+        Loaded model:
+        predict X: 6.0, y_pred: 11.90
+        predict X: 8.0, y_pred: 15.92
+        predict X: 12.0, y_pred: 23.96
+        predict X: 30.0, y_pred: 60.13
+        --
+        Loaded scripted_model:
+        predict X: 6.0, y_pred: 11.90
+        predict X: 8.0, y_pred: 15.92
+        predict X: 12.0, y_pred: 23.96
+        predict X: 30.0, y_pred: 60.13
+    ```
+
+    """
+    _validate_env_arguments(conda_env, pip_requirements, extra_pip_requirements)
 
     if not isinstance(sb3_model, BaseAlgorithm):
         raise TypeError(
@@ -174,19 +520,9 @@ def save_model(
     model_data_path = os.path.join(path, model_data_subpath)
     os.makedirs(model_data_path)
 
-    # Persist the pickle module name as a file in the model's `data` directory. This is necessary
-    # because the `data` directory is the only available parameter to `_load_pyfunc`, and it
-    # does not contain the MLmodel configuration; therefore, it is not sufficient to place
-    # the module name in the MLmodel
-    #
-    # TODO: Stop persisting this information to the filesystem once we have a mechanism for
-    # supplying the MLmodel configuration to `mlflow.sb3._load_pyfunc`
-    pickle_module_path = os.path.join(model_data_path, _pickle_module_info_file_name)
-    with open(pickle_module_path, "w") as f:
-        f.write(pickle_module.__name__)
     # Save SB3 model
     model_path = os.path.join(model_data_path, _serialized_sb3_model_file_name)
-    sb3_model.save(model_path)
+    sb3_model.save(model_path, **kwargs)
 
     sb3serve_artifacts_config = {}
 
@@ -220,7 +556,6 @@ def save_model(
         mlflow_model,
         loader_module="mlflow_rl_tools.sb3",
         data=model_data_subpath,
-        pickle_module_name=pickle_module.__name__,
         code=code_dir_subpath,
         conda_env=_conda_env_file_name,
         python_env=_python_env_file_name,
