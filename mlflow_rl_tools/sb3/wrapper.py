@@ -1,4 +1,5 @@
 from typing import Any
+
 from mlflow.pyfunc import PythonModel, PythonModelContext
 from numpy.typing import NDArray
 from stable_baselines3.common.base_class import SelfBaseAlgorithm
@@ -19,6 +20,12 @@ class ModelWrapper(PythonModel):
             The Stable-Baselines3 model instance to wrap.
         """
         self.model: SelfBaseAlgorithm = model
+
+    def get_raw_model(self) -> SelfBaseAlgorithm:
+        """
+        Returns the underlying model.
+        """
+        return self.model
 
     def predict(
         self, context: PythonModelContext, model_input: NDArray | dict[str, NDArray]
