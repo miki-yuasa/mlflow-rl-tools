@@ -3,9 +3,9 @@ import pytest
 import gymnasium as gym
 import mlflow
 from mlflow.models.model import ModelInfo
-from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import SubprocVecEnv
 from stable_baselines3.common.base_class import SelfBaseAlgorithm
+from sb3_contrib import TQC
 
 from mlflow_rl_tools import sb3_contrib
 
@@ -18,11 +18,11 @@ REGISTERED_MODEL_NAME_VEC = "test_sb3_contrib_log_model_vec"
 registered_model_names: list[str] = [REGISTERED_MODEL_NAME, REGISTERED_MODEL_NAME_VEC]
 
 envs: list[gym.Env] = [
-    gym.make("CartPole-v1"),
-    SubprocVecEnv([lambda: gym.make("CartPole-v1") for _ in range(4)]),
+    gym.make("MountainCarContinuous-v0"),
+    SubprocVecEnv([lambda: gym.make("MountainCarContinuous-v0") for _ in range(4)]),
 ]
 
-models: list[PPO] = [PPO("MlpPolicy", envs, verbose=1) for envs in envs]
+models: list[TQC] = [TQC("MlpPolicy", envs, verbose=1) for envs in envs]
 
 
 def setup_module(module):
@@ -31,7 +31,7 @@ def setup_module(module):
 
 
 @pytest.mark.parametrize("model, model_name", zip(models, registered_model_names))
-def test_sb3_contrib_log_model(model: PPO, model_name: str):
+def test_sb3_contrib_log_model(model: TQC, model_name: str):
     with mlflow.start_run():
         model_info: ModelInfo = sb3_contrib.log_model(
             model, "model", registered_model_name=model_name
