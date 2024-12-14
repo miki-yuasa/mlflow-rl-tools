@@ -10,10 +10,17 @@ readme = "README.md"
 python = "^3.10"
 mlflow = "^2.0.1"
 stable-baselines3 = { version = "^2.0.0", optional = true }
+sb3-contrib = { version = "^2.0.0", optional = true }
 
 [tool.poetry.extras]
 sb3 = ["stable-baselines3"]
+sb3-contrib = ["sb3-contrib"]
 
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3.4"
+stable-baselines3 = "^2.0.0"
+sb3-contrib = "^2.0.0"
 
 [build-system]
 requires = ["poetry-core"]
