@@ -8,28 +8,118 @@ PyTorch (native) format
     Produced for use by generic pyfunc-based deployment tools and batch inference.
 """
 
-from typing import Any
+import os
+import posixpath
+import shutil
+from types import ModuleType
+from typing import Any, TypeVar
+import warnings
 
-from mlflow.models import ModelSignature
-from mlflow.models.model import ModelInfo
-from mlflow.models.utils import ModelInputExample
+import mlflow
+from mlflow import pyfunc
+from mlflow.exceptions import MlflowException
+from mlflow.models import Model, ModelSignature
+from mlflow.models.model import MLMODEL_FILE_NAME, ModelInfo
+from mlflow.models.signature import _infer_signature_from_input_example
+from mlflow.models.utils import ModelInputExample, _save_example, _Example
 from mlflow.tracking._model_registry import DEFAULT_AWAIT_MAX_SLEEP_SECONDS
+from mlflow.tracking.artifact_utils import _download_artifact_from_uri
+from mlflow.utils.checkpoint_utils import download_checkpoint_artifact
+from mlflow.utils.environment import (
+    _CONDA_ENV_FILE_NAME,
+    _CONSTRAINTS_FILE_NAME,
+    _PYTHON_ENV_FILE_NAME,
+    _REQUIREMENTS_FILE_NAME,
+    _mlflow_conda_env,
+    _process_conda_env,
+    _process_pip_requirements,
+    _PythonEnv,
+    _validate_env_arguments,
+)
+from mlflow.utils.file_utils import (
+    TempDir,
+    get_total_file_size,
+    write_to,
+)
+from mlflow.utils.model_utils import (
+    _add_code_from_conf_to_system_path,
+    _get_flavor_configuration,
+    _validate_and_copy_code_paths,
+    _validate_and_prepare_target_save_path,
+)
+from mlflow.utils.requirements_utils import _get_pinned_requirement
 import stable_baselines3
-from stable_baselines3.common.base_class import SelfBaseAlgorithm
+from stable_baselines3.common.base_class import SelfBaseAlgorithm, BaseAlgorithm
+import yaml
 
-import mlflow_rl_tools
-from mlflow_rl_tools._sb3_base import log_model as base_log_model
-from mlflow_rl_tools._sb3_base import load_model as base_load_model
-from mlflow_rl_tools._sb3_base import _load_pyfunc as _base_load_pyfunc
-from mlflow_rl_tools._sb3_base import save_model as base_save_model
-from mlflow_rl_tools._sb3_base import MLflowModel
+from mlflow_rl_tools._sb3_base.wrapper import ModelWrapper
 
-FLAVOR_NAME = "sb3"
+_SERIALIZED_SB3_MODEL_FILE_NAME = "model.zip"
+_SB3_STATE_DICT_FILE_NAME = "state_dict.pth"
+_SB3_ALGO_CLASS_FILE_NAME = "algo_name.txt"
+_EXTRA_FILES_KEY = "extra_files"
+_SB3_CPU_DEVICE_NAME = "cpu"
+_SB3_DEFAULT_GPU_DEVICE_NAME = "cuda"
+
+_MODEL_DATA_SUBPATH = "data"
+
+MLflowModel = TypeVar("MLflowModel", bound=Model)
+
+
+def get_default_pip_requirements():
+    """
+    Get default pip requirements for MLflow Models produced by this flavor.
+
+    Returns
+    -------
+    default_pip_requirements : list[str]
+        List of default pip requirements for MLflow Models produced by this flavor.
+        Calls to `save_model()` and `log_model()` produce a pip environment.
+        This pip environment, at minimum, contains these requirements.
+    """
+    default_requirements: list[str] = list(
+        map(_get_pinned_requirement, ["stable-baselines3", "gymnasium", "torch"])
+    )
+
+    return default_requirements
+
+
+def get_default_conda_env():
+    """
+    Returns:
+        The default Conda environment as a dictionary for MLflow Models produced by calls to
+        :func:`save_model()` and :func:`log_model()`.
+
+    .. code-block:: python
+        :caption: Example
+
+        import mlflow
+
+        # Log PyTorch model
+        with mlflow.start_run() as run:
+            mlflow.pytorch.log_model(model, "model", signature=signature)
+
+        # Fetch the associated conda environment
+        env = mlflow.pytorch.get_default_conda_env()
+        print(f"conda env: {env}")
+
+    .. code-block:: text
+        :caption: Output
+
+        conda env {'name': 'mlflow-env',
+                   'channels': ['conda-forge'],
+                   'dependencies': ['python=3.8.15',
+                                    {'pip': ['torch==1.5.1',
+                                             'mlflow',
+                                             'cloudpickle==1.6.0']}]}
+    """
+    return _mlflow_conda_env(additional_pip_deps=get_default_pip_requirements())
 
 
 def log_model(
     sb3_model: SelfBaseAlgorithm,
     artifact_path: str,
+    flavor: ModuleType,
     conda_env: dict[str, Any] | None = None,
     code_paths: list[str] | None = None,
     registered_model_name: str | None = None,
@@ -214,20 +304,20 @@ def log_model(
         artifacts: ['scripted_model/data/model.pth']
     ```
     """
-    return base_log_model(
-        sb3_model,
-        artifact_path,
-        mlflow_rl_tools.sb3,
-        conda_env,
-        code_paths,
-        registered_model_name,
-        signature,
-        input_example,
-        await_registration_for,
-        extra_files,
-        pip_requirements,
-        extra_pip_requirements,
-        metadata,
+    return Model.log(
+        artifact_path=artifact_path,
+        flavor=flavor,
+        sb3_model=sb3_model,
+        conda_env=conda_env,
+        code_paths=code_paths,
+        registered_model_name=registered_model_name,
+        signature=signature,
+        input_example=input_example,
+        await_registration_for=await_registration_for,
+        extra_files=extra_files,
+        pip_requirements=pip_requirements,
+        extra_pip_requirements=extra_pip_requirements,
+        metadata=metadata,
         **kwargs,
     )
 
@@ -235,6 +325,7 @@ def log_model(
 def save_model(
     sb3_model: SelfBaseAlgorithm,
     path: str,
+    flavor_name: str,
     conda_env: dict[str, Any] | None = None,
     mlflow_model: MLflowModel | None = None,
     code_paths: list[str] | None = None,
@@ -244,6 +335,15 @@ def save_model(
     pip_requirements: str | list[str] | None = None,
     extra_pip_requirements: str | list[str] | None = None,
     metadata: dict[str, Any] | None = None,
+    mlmodel_file_name: str = MLMODEL_FILE_NAME,
+    model_data_subpath: str = _MODEL_DATA_SUBPATH,
+    _serialized_sb3_model_file_name: str = _SERIALIZED_SB3_MODEL_FILE_NAME,
+    _sb3_algo_class_file_name: str = _SB3_ALGO_CLASS_FILE_NAME,
+    _conda_env_file_name: str = _CONDA_ENV_FILE_NAME,
+    _python_env_file_name: str = _PYTHON_ENV_FILE_NAME,
+    _extra_files_key: str = _EXTRA_FILES_KEY,
+    _requirements_file_name: str = _REQUIREMENTS_FILE_NAME,
+    _constraints_file_name: str = _CONSTRAINTS_FILE_NAME,
     **kwargs,
 ) -> None:
     """
@@ -336,6 +436,36 @@ def save_model(
     metadata: dict[str, Any] | None = None
         Custom metadata dictionary passed to the model and stored in the MLmodel file.
 
+    flavor_name: str = "sb3"
+        The name of the flavor that is being added to the model.
+
+    mlmodel_file_name: str = "MLmodel"
+        The name of the MLmodel file.
+
+    model_data_subpath: str = "data"
+        The subdirectory within the model's root directory where data is stored.
+
+    _serialized_sb3_model_file_name: str = "model.zip"
+        The name of the serialized SB3 model file.
+
+    _sb3_algo_class_file_name: str = "algo_name.txt"
+        The name of the file that contains the SB3 algorithm class name.
+
+    _conda_env_file_name: str = "conda.yaml"
+        The name of the Conda environment file.
+
+    _python_env_file_name: str = "python.yaml"
+        The name of the Python environment file.
+
+    _extra_files_key: str = "extra_files"
+        The key in the MLmodel file's flavor configuration that specifies the paths to extra files.
+
+    _requirements_file_name: str = "requirements.txt"
+        The name of the pip requirements file.
+
+    _constraints_file_name: str = "constraints.txt"
+        The name of the pip constraints file.
+
     kwargs:
         kwargs to pass to ``stable_baselines3.{algorithm}.save`` method.
 
@@ -386,25 +516,187 @@ def save_model(
     ```
 
     """
-    return base_save_model(
-        sb3_model,
-        path,
-        FLAVOR_NAME,
-        conda_env,
-        mlflow_model,
-        code_paths,
-        signature,
-        input_example,
-        extra_files,
-        pip_requirements,
-        extra_pip_requirements,
-        metadata,
-        **kwargs,
+    _validate_env_arguments(conda_env, pip_requirements, extra_pip_requirements)
+
+    if not isinstance(sb3_model, BaseAlgorithm):
+        raise MlflowException(
+            f"sb3_model must be an instance of Stable-Baselines3's BaseAlgorithm class. "
+            f"Received {type(sb3_model)}."
+        )
+
+    if mlflow_model is None:
+        mlflow_model = Model()
+    saved_example: _Example | None = _save_example(input_example, input_example, path)
+
+    if signature is None and saved_example is not None:
+        wrapped_model = ModelWrapper(sb3_model)
+        signature: ModelSignature | None = _infer_signature_from_input_example(
+            saved_example, wrapped_model
+        )
+    elif signature is False:
+        signature = None
+    else:
+        pass
+
+    if signature is not None:
+        mlflow_model.signature = signature
+    else:
+        pass
+
+    if metadata is not None:
+        mlflow_model.metadata = metadata
+    else:
+        pass
+
+    code_dir_subpath: str = _validate_and_copy_code_paths(code_paths, path)
+
+    model_data_path = os.path.join(path, model_data_subpath)
+    os.makedirs(model_data_path)
+
+    # Persist the algo class name as a file in the model's `data` directory.
+    # This is necessary because the `data` directory is the only available parameter to `_load_pyfunc`,
+    # and it does not contain the MLmodel configuration;
+    # therefore, it is not sufficient to place the module name in the MLmodel
+    #
+    # TODO: Stop persisting this information to the filesystem once we have a mechanism for
+    # supplying the MLmodel configuration to `mlflow.pytorch._load_pyfunc`
+    algo_name_path = os.path.join(model_data_path, _sb3_algo_class_file_name)
+    with open(algo_name_path, "w") as f:
+        f.write(sb3_model.__class__.__name__)
+
+    # Save SB3 model
+    model_path = os.path.join(model_data_path, _serialized_sb3_model_file_name)
+    sb3_model.save(model_path, **kwargs)
+
+    sb3serve_artifacts_config = {}
+
+    if extra_files:
+        sb3serve_artifacts_config[_extra_files_key] = []
+        if not isinstance(extra_files, list):
+            raise TypeError("Extra files argument should be a list")
+
+        with TempDir() as tmp_extra_files_dir:
+            for extra_file in extra_files:
+                _download_artifact_from_uri(
+                    artifact_uri=extra_file, output_path=tmp_extra_files_dir.path()
+                )
+                rel_path = posixpath.join(
+                    _extra_files_key, os.path.basename(extra_file)
+                )
+                sb3serve_artifacts_config[_extra_files_key].append({"path": rel_path})
+            shutil.move(
+                tmp_extra_files_dir.path(),
+                posixpath.join(path, _extra_files_key),
+            )
+
+    mlflow_model.add_flavor(
+        flavor_name,
+        model_data=model_data_subpath,
+        sb3_version=str(stable_baselines3.__version__),
+        code=code_dir_subpath,
+        **sb3serve_artifacts_config,
     )
+    pyfunc.add_to_model(
+        mlflow_model,
+        loader_module="mlflow_rl_tools.sb3",
+        data=model_data_subpath,
+        code=code_dir_subpath,
+        conda_env=_conda_env_file_name,
+        python_env=_python_env_file_name,
+        model_config={"device": None},
+    )
+    if size := get_total_file_size(path):
+        mlflow_model.model_size_bytes = size
+    else:
+        pass
+
+    mlflow_model.save(os.path.join(path, mlmodel_file_name))
+
+    if conda_env is None:
+        if pip_requirements is None:
+            default_reqs = get_default_pip_requirements()
+            # To ensure `_load_pyfunc` can successfully load the model during the dependency
+            # inference, `mlflow_model.save` must be called beforehand to save an MLmodel file.
+            inferred_reqs = mlflow.models.infer_pip_requirements(
+                model_data_path,
+                flavor=flavor_name,
+                fallback=default_reqs,
+            )
+            default_reqs = sorted(set(inferred_reqs).union(default_reqs))
+        else:
+            default_reqs = None
+
+        conda_env, pip_requirements, pip_constraints = _process_pip_requirements(
+            default_reqs,
+            pip_requirements,
+            extra_pip_requirements,
+        )
+    else:
+        conda_env, pip_requirements, pip_constraints = _process_conda_env(conda_env)
+
+    with open(os.path.join(path, _conda_env_file_name), "w") as f:
+        yaml.safe_dump(conda_env, stream=f, default_flow_style=False)
+
+    # Save `constraints.txt` if necessary
+    if pip_constraints:
+        write_to(os.path.join(path, _constraints_file_name), "\n".join(pip_constraints))
+    else:
+        pass
+
+    write_to(os.path.join(path, _requirements_file_name), "\n".join(pip_requirements))
+
+    _PythonEnv.current().to_yaml(os.path.join(path, _python_env_file_name))
+
+
+def _load_model(
+    path: str,
+    _algo_module: ModuleType,
+    _sb3_algo_class_file_name: str = _SB3_ALGO_CLASS_FILE_NAME,
+    **kwargs,
+) -> SelfBaseAlgorithm:
+    """
+    Load a PyTorch model from a local file.
+
+    Parameters
+    ----------
+    path: str
+        Local filesystem path to the model.
+    _sb3_algo_class_file_name: str = _SB3_ALGO_CLASS_FILE_NAME
+        The name of the file that contains the SB3 algorithm class name.
+    kwargs:
+        Additional kwargs to pass to the SB3 model's `load` method.
+
+    Returns
+    -------
+    sb3_model: SelfBaseAlgorithm
+        The loaded SB3 model.
+    """
+    import torch
+
+    if os.path.isdir(path):
+        # `path` is a directory containing a serialized PyTorch model and a text file containing
+        # information about the pickle module that should be used by PyTorch to load it
+        model_path = os.path.join(path, "model.zip")
+    else:
+        model_path = path
+
+    algo_name_path = os.path.join(
+        os.path.dirname(model_path), _sb3_algo_class_file_name
+    )
+    with open(algo_name_path, "r") as f:
+        algo_name = f.read().strip()
+
+    sb3_model: SelfBaseAlgorithm = getattr(_algo_module, algo_name).load(
+        model_path, **kwargs
+    )
+
+    return sb3_model
 
 
 def load_model(
     model_uri: str,
+    _algo_module: ModuleType,
+    flavor_name: str,
     dst_path: str | None = None,
     **kwargs,
 ) -> SelfBaseAlgorithm:
@@ -470,9 +762,46 @@ def load_model(
     ```
     """
 
-    return base_load_model(
-        model_uri, stable_baselines3, FLAVOR_NAME, dst_path, **kwargs
+    local_model_path = _download_artifact_from_uri(
+        artifact_uri=model_uri, output_path=dst_path
+    )
+    sb3_conf = _get_flavor_configuration(
+        model_path=local_model_path, flavor_name=flavor_name
+    )
+    _add_code_from_conf_to_system_path(local_model_path, sb3_conf)
+
+    if stable_baselines3.__version__ != sb3_conf["sb3_version"]:
+        warnings.warn(
+            "Stored model version '%s' does not match installed Stable Baselines3 version '%s'"
+            % (sb3_conf["sb3_version"], stable_baselines3.__version__),
+        )
+
+    sb3_model_artifacts_path = os.path.join(local_model_path, sb3_conf["model_data"])
+    return _load_model(
+        path=sb3_model_artifacts_path, _algo_module=_algo_module, **kwargs
     )
 
 
-_load_pyfunc = _base_load_pyfunc
+def _load_pyfunc(
+    path,
+    model_config: dict[str, Any] = None,
+):
+    """
+    Load PyFunc implementation. Called by ``pyfunc.load_model``.
+
+    Parameters
+    ----------
+    path : str
+        The path to the MLflow model.
+    model_config : dict
+        The model configuration to load SB3 models.
+
+    Returns
+    -------
+    ModelWrapper
+        A PyFunc model instance.
+    """
+
+    pyfunc_model = ModelWrapper(_load_model(path, **model_config))
+
+    return pyfunc_model

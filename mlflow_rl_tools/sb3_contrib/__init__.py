@@ -1,19 +1,18 @@
-from types import ModuleType
 from typing import Any
 
 from mlflow.models import ModelSignature
 from mlflow.models.model import ModelInfo
 from mlflow.models.utils import ModelInputExample
 from mlflow.tracking._model_registry import DEFAULT_AWAIT_MAX_SLEEP_SECONDS
-from stable_baselines3.common.base_class import SelfBaseAlgorithm, BaseAlgorithm
+from stable_baselines3.common.base_class import SelfBaseAlgorithm
 import sb3_contrib
 
 import mlflow_rl_tools
-from mlflow_rl_tools.sb3 import MLflowModel
-from mlflow_rl_tools.sb3 import load_model as sb3_load_model
-from mlflow_rl_tools.sb3 import _load_pyfunc as sb3_load_pyfunc
-from mlflow_rl_tools.sb3 import log_model as sb3_log_model
-from mlflow_rl_tools.sb3 import save_model as sb3_save_model
+from mlflow_rl_tools._sb3_base import log_model as base_log_model
+from mlflow_rl_tools._sb3_base import load_model as base_load_model
+from mlflow_rl_tools._sb3_base import _load_pyfunc as _base_load_pyfunc
+from mlflow_rl_tools._sb3_base import save_model as base_save_model
+from mlflow_rl_tools._sb3_base import MLflowModel
 
 FLAVOR_NAME = "sb3_contrib"
 
@@ -73,7 +72,7 @@ def log_model(
     ModelInfo
         A data class containing metadata about the model.
     """
-    return sb3_log_model(
+    return base_log_model(
         sb3_contrib_model,
         artifact_path,
         conda_env=conda_env,
@@ -103,7 +102,6 @@ def save_model(
     pip_requirements: str | list[str] | None = None,
     extra_pip_requirements: str | list[str] | None = None,
     metadata: dict[str, Any] | None = None,
-    flavor_name: str = FLAVOR_NAME,
     **kwargs,
 ) -> None:
     """
@@ -203,9 +201,10 @@ def save_model(
         kwargs to pass to ``stable_baselines3.{algorithm}.save`` method.
     """
 
-    return sb3_save_model(
+    return base_save_model(
         sb3_contrib_model,
         path,
+        flavor_name=FLAVOR_NAME,
         conda_env=conda_env,
         mlflow_model=mlflow_model,
         code_paths=code_paths,
@@ -215,7 +214,6 @@ def save_model(
         pip_requirements=pip_requirements,
         extra_pip_requirements=extra_pip_requirements,
         metadata=metadata,
-        flavor_name=flavor_name,
         **kwargs,
     )
 
@@ -223,7 +221,6 @@ def save_model(
 def load_model(
     model_uri: str,
     dst_path: str | None = None,
-    _algo_module: ModuleType = sb3_contrib,
     **kwargs,
 ) -> SelfBaseAlgorithm:
     """
@@ -288,12 +285,12 @@ def load_model(
     ```
     """
 
-    return sb3_load_model(
+    return base_load_model(
         model_uri,
         dst_path=dst_path,
-        _algo_module=_algo_module,
+        _algo_module=sb3_contrib,
         **kwargs,
     )
 
 
-_load_pyfunc = sb3_load_pyfunc
+_load_pyfunc = _base_load_pyfunc
