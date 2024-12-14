@@ -1,6 +1,6 @@
 from typing import Any
 
-from mlflow.models import ModelSignature
+from mlflow.models import ModelSignature, Model
 from mlflow.models.model import ModelInfo
 from mlflow.models.utils import ModelInputExample
 from mlflow.tracking._model_registry import DEFAULT_AWAIT_MAX_SLEEP_SECONDS
@@ -72,9 +72,10 @@ def log_model(
     ModelInfo
         A data class containing metadata about the model.
     """
-    return base_log_model(
-        sb3_contrib_model,
-        artifact_path,
+    return Model.log(
+        artifact_path=artifact_path,
+        flavor=mlflow_rl_tools.sb3_contrib,
+        sb3_contrib_model=sb3_contrib_model,
         conda_env=conda_env,
         code_paths=code_paths,
         registered_model_name=registered_model_name,
@@ -85,7 +86,6 @@ def log_model(
         pip_requirements=pip_requirements,
         extra_pip_requirements=extra_pip_requirements,
         metadata=metadata,
-        flavor=mlflow_rl_tools.sb3_contrib,
         **kwargs,
     )
 
@@ -287,8 +287,9 @@ def load_model(
 
     return base_load_model(
         model_uri,
-        dst_path=dst_path,
         _algo_module=sb3_contrib,
+        flavor_name=FLAVOR_NAME,
+        dst_path=dst_path,
         **kwargs,
     )
 

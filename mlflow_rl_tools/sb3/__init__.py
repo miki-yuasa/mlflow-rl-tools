@@ -10,7 +10,7 @@ PyTorch (native) format
 
 from typing import Any
 
-from mlflow.models import ModelSignature
+from mlflow.models import ModelSignature, Model
 from mlflow.models.model import ModelInfo
 from mlflow.models.utils import ModelInputExample
 from mlflow.tracking._model_registry import DEFAULT_AWAIT_MAX_SLEEP_SECONDS
@@ -23,6 +23,7 @@ from mlflow_rl_tools._sb3_base import load_model as base_load_model
 from mlflow_rl_tools._sb3_base import _load_pyfunc as _base_load_pyfunc
 from mlflow_rl_tools._sb3_base import save_model as base_save_model
 from mlflow_rl_tools._sb3_base import MLflowModel
+import mlflow_rl_tools.sb3
 
 FLAVOR_NAME = "sb3"
 
@@ -214,20 +215,20 @@ def log_model(
         artifacts: ['scripted_model/data/model.pth']
     ```
     """
-    return base_log_model(
-        sb3_model,
-        artifact_path,
-        mlflow_rl_tools.sb3,
-        conda_env,
-        code_paths,
-        registered_model_name,
-        signature,
-        input_example,
-        await_registration_for,
-        extra_files,
-        pip_requirements,
-        extra_pip_requirements,
-        metadata,
+    return Model.log(
+        artifact_path=artifact_path,
+        flavor=mlflow_rl_tools.sb3,
+        sb3_model=sb3_model,
+        conda_env=conda_env,
+        code_paths=code_paths,
+        registered_model_name=registered_model_name,
+        signature=signature,
+        input_example=input_example,
+        await_registration_for=await_registration_for,
+        extra_files=extra_files,
+        pip_requirements=pip_requirements,
+        extra_pip_requirements=extra_pip_requirements,
+        metadata=metadata,
         **kwargs,
     )
 
