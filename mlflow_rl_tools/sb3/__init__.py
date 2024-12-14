@@ -11,6 +11,7 @@ PyTorch (native) format
 import os
 import posixpath
 import shutil
+from types import ModuleType
 from typing import Any, TypeVar
 import warnings
 
@@ -49,7 +50,6 @@ from mlflow.utils.model_utils import (
 from mlflow.utils.requirements_utils import _get_pinned_requirement
 import stable_baselines3
 from stable_baselines3.common.base_class import SelfBaseAlgorithm, BaseAlgorithm
-import torch
 import yaml
 
 import mlflow_rl_tools
@@ -133,6 +133,7 @@ def log_model(
     pip_requirements: str | list[str] | None = None,
     extra_pip_requirements: str | list[str] | None = None,
     metadata: dict[str, Any] | None = None,
+    flavor: ModuleType = mlflow_rl_tools.sb3,
     **kwargs,
 ) -> ModelInfo:
     """
@@ -309,7 +310,7 @@ def log_model(
     """
     return Model.log(
         artifact_path=artifact_path,
-        flavor=mlflow_rl_tools.sb3,
+        flavor=flavor,
         sb3_model=sb3_model,
         conda_env=conda_env,
         code_paths=code_paths,
@@ -653,6 +654,7 @@ def save_model(
 
 def _load_model(
     path: str,
+    _algo_module: ModuleType = stable_baselines3,
     _sb3_algo_class_file_name: str = _SB3_ALGO_CLASS_FILE_NAME,
     **kwargs,
 ) -> SelfBaseAlgorithm:
@@ -688,7 +690,7 @@ def _load_model(
     with open(algo_name_path, "r") as f:
         algo_name = f.read().strip()
 
-    sb3_model: SelfBaseAlgorithm = getattr(stable_baselines3, algo_name).load(
+    sb3_model: SelfBaseAlgorithm = getattr(_algo_module, algo_name).load(
         model_path, **kwargs
     )
 
@@ -696,7 +698,10 @@ def _load_model(
 
 
 def load_model(
-    model_uri: str, dst_path: str | None = None, **kwargs
+    model_uri: str,
+    dst_path: str | None = None,
+    _algo_module: ModuleType = stable_baselines3,
+    **kwargs,
 ) -> SelfBaseAlgorithm:
     """
     Load a PyTorch model from a local file or a run.
@@ -775,10 +780,15 @@ def load_model(
         )
 
     sb3_model_artifacts_path = os.path.join(local_model_path, sb3_conf["model_data"])
-    return _load_model(path=sb3_model_artifacts_path, **kwargs)
+    return _load_model(
+        path=sb3_model_artifacts_path, _algo_module=_algo_module, **kwargs
+    )
 
 
-def _load_pyfunc(path, model_config: dict[str, Any] = None):
+def _load_pyfunc(
+    path,
+    model_config: dict[str, Any] = None,
+):
     """
     Load PyFunc implementation. Called by ``pyfunc.load_model``.
 
