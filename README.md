@@ -5,8 +5,8 @@ This package uses Poetry as the package manager and is pip-installable.
 You can simply run `pip install` to add to your dependency or `poetry install` to contribute.
 
 ## Usage
-Currently, `mlflow-rl-tools` provides a logger and a wrapper for Stable-Baselines3.
-You can use `mlflow_tl_tools.sb3.log.MLflowOutputFormat` to log model metrics in MLflow and `mlflow_tl_tools.sb3.wrapper.ModelWrapper` to wrap your SB3 models.
+Currently, `mlflow-rl-tools` provides flavors for Stable-Baselines3 and SB3-Contrib packages.
+You can use `mlflow_rl_tools.sb3.log.MLflowOutputFormat` to log model metrics in MLflow and `mlflow_rl_tools.sb3` and `mlflow_rl_tools.sb3_contrib` flavors to log, save, and load your models like `mlflow.pytorch` flavor.
 
 ## Examples
 Refer to this [repo](https://github.com/Tran-Research-Group/mlflow-tutorial) to see how to use this package.
