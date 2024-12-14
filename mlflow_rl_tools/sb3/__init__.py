@@ -16,19 +16,14 @@ import warnings
 
 import mlflow
 from mlflow import pyfunc
-from mlflow.environment_variables import MLFLOW_DEFAULT_PREDICTION_DEVICE
 from mlflow.exceptions import MlflowException
-from mlflow.ml_package_versions import _ML_PACKAGE_VERSIONS
 from mlflow.models import Model, ModelSignature
-from mlflow.models.model import MLMODEL_FILE_NAME
+from mlflow.models.model import MLMODEL_FILE_NAME, ModelInfo
 from mlflow.models.signature import _infer_signature_from_input_example
 from mlflow.models.utils import ModelInputExample, _save_example, _Example
-from mlflow.protos.databricks_pb2 import RESOURCE_DOES_NOT_EXIST
 from mlflow.tracking._model_registry import DEFAULT_AWAIT_MAX_SLEEP_SECONDS
 from mlflow.tracking.artifact_utils import _download_artifact_from_uri
-from mlflow.utils.autologging_utils import autologging_integration, safe_patch
 from mlflow.utils.checkpoint_utils import download_checkpoint_artifact
-from mlflow.utils.docstring_utils import LOG_MODEL_PARAM_DOCS, format_docstring
 from mlflow.utils.environment import (
     _CONDA_ENV_FILE_NAME,
     _CONSTRAINTS_FILE_NAME,
@@ -57,6 +52,8 @@ from stable_baselines3.common.base_class import SelfBaseAlgorithm, BaseAlgorithm
 import torch
 import yaml
 
+import mlflow_rl_tools
+import mlflow_rl_tools.sb3
 from mlflow_rl_tools.sb3.wrapper import ModelWrapper
 
 FLAVOR_NAME = "sb3"
@@ -137,7 +134,7 @@ def log_model(
     extra_pip_requirements: str | list[str] | None = None,
     metadata: dict[str, Any] | None = None,
     **kwargs,
-):
+) -> ModelInfo:
     """
     Log a PyTorch model as an MLflow artifact for the current run.
 
@@ -312,7 +309,7 @@ def log_model(
     """
     return Model.log(
         artifact_path=artifact_path,
-        flavor=mlflow.pytorch,
+        flavor=mlflow_rl_tools.sb3,
         sb3_model=sb3_model,
         conda_env=conda_env,
         code_paths=code_paths,
@@ -698,7 +695,9 @@ def _load_model(
     return sb3_model
 
 
-def load_model(model_uri: str, dst_path: str | None = None, **kwargs):
+def load_model(
+    model_uri: str, dst_path: str | None = None, **kwargs
+) -> SelfBaseAlgorithm:
     """
     Load a PyTorch model from a local file or a run.
 
