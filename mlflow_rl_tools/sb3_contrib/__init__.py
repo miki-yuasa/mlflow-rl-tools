@@ -8,7 +8,6 @@ from stable_baselines3.common.base_class import SelfBaseAlgorithm
 import sb3_contrib
 
 import mlflow_rl_tools
-from mlflow_rl_tools._sb3_base import log_model as base_log_model
 from mlflow_rl_tools._sb3_base import load_model as base_load_model
 from mlflow_rl_tools._sb3_base import _load_pyfunc as _base_load_pyfunc
 from mlflow_rl_tools._sb3_base import save_model as base_save_model
